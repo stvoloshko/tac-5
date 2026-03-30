@@ -4,6 +4,64 @@ from openai import OpenAI
 from anthropic import Anthropic
 from core.data_models import QueryRequest
 
+def generate_sql_with_openrouter(query_text: str, schema_info: Dict[str, Any]) -> str:
+    """
+    Generate SQL query using OpenRouter API with NVIDIA Nemotron 3 free model
+    """
+    try:
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise ValueError("OPENROUTER_API_KEY environment variable not set")
+
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+        schema_description = format_schema_for_prompt(schema_info)
+
+        prompt = f"""Given the following database schema:
+
+{schema_description}
+
+Convert this natural language query to SQL: "{query_text}"
+
+Rules:
+- Return ONLY the SQL query, no explanations
+- Use proper SQLite syntax
+- Handle date/time queries appropriately (e.g., "last week" = date('now', '-7 days'))
+- Be careful with column names and table names
+- If the query is ambiguous, make reasonable assumptions
+- For multi-table queries, use proper JOIN conditions to avoid Cartesian products
+- Limit results to reasonable amounts (e.g., add LIMIT 100 for large result sets)
+- When joining tables, use meaningful relationships between tables
+
+SQL Query:"""
+
+        response = client.chat.completions.create(
+            model="nvidia/nemotron-3-super-120b-a12b:free",
+            messages=[
+                {"role": "system", "content": "You are a SQL expert. Convert natural language to SQL queries."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            max_tokens=500
+        )
+
+        sql = response.choices[0].message.content.strip()
+
+        if sql.startswith("```sql"):
+            sql = sql[6:]
+        if sql.startswith("```"):
+            sql = sql[3:]
+        if sql.endswith("```"):
+            sql = sql[:-3]
+
+        return sql.strip()
+
+    except Exception as e:
+        raise Exception(f"Error generating SQL with OpenRouter: {str(e)}")
+
 def generate_sql_with_openai(query_text: str, schema_info: Dict[str, Any]) -> str:
     """
     Generate SQL query using OpenAI API
@@ -144,18 +202,19 @@ def format_schema_for_prompt(schema_info: Dict[str, Any]) -> str:
 def generate_sql(request: QueryRequest, schema_info: Dict[str, Any]) -> str:
     """
     Route to appropriate LLM provider based on API key availability and request preference.
-    Priority: 1) OpenAI API key exists, 2) Anthropic API key exists, 3) request.llm_provider
+    Priority: 1) OpenRouter (Nemotron 3), 2) OpenAI, 3) Anthropic
     """
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-    
-    # Check API key availability first (OpenAI priority)
-    if openai_key:
+
+    if openrouter_key:
+        return generate_sql_with_openrouter(request.query, schema_info)
+    elif openai_key:
         return generate_sql_with_openai(request.query, schema_info)
     elif anthropic_key:
         return generate_sql_with_anthropic(request.query, schema_info)
-    
-    # Fall back to request preference if both keys available or neither available
+
     if request.llm_provider == "openai":
         return generate_sql_with_openai(request.query, schema_info)
     else:
